@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Color Picker Canvas</title>
+  <link href="./output.css" rel="stylesheet">
+  <style>
+    canvas {
+      border: 2px solid #000;
+      border-radius: 8px;
+      touch-action: none;
+    }
+    #color-picker, #brightness-bar {
+      cursor: crosshair;
+    }
+    #color-preview-container {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    #color-preview {
+      width: 2rem;
+      height: 2rem;
+      border: 1px solid #000;
+    }
+    #color-code {
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body class="bg-gradient-to-b from-gray-200 to-gray-400 text-gray-800 font-sans min-h-screen flex items-center justify-center">
+  <div class="flex flex-col md:flex-row items-center justify-center w-full max-w-6xl px-4 space-y-8 md:space-y-0 md:space-x-8">
+    
+    <!-- Controls -->
+    <div class="flex flex-col space-y-4 items-center">
+      <button id="draw-btn" class="bg-gray-300 px-4 py-2 rounded-md hover:bg-gray-400">Draw</button>
+      <button id="erase-btn" class="bg-gray-300 px-4 py-2 rounded-md hover:bg-gray-400">Erase</button>
+      <button id="undo-btn" class="bg-gray-300 px-4 py-2 rounded-md hover:bg-gray-400">Undo</button>
+      <button id="redo-btn" class="bg-gray-300 px-4 py-2 rounded-md hover:bg-gray-400">Redo</button>
+      <button id="clear-btn" class="bg-gray-300 px-4 py-2 rounded-md hover:bg-gray-400">Clear</button>
+
+      <label for="brush-size" class="text-sm">Brush Size</label>
+      <input type="range" id="brush-size" min="1" max="50" value="5" class="w-24">
+
+      <div class="flex space-x-2">
+        <canvas id="color-picker" width="200" height="150"></canvas>
+        <canvas id="brightness-bar" width="20" height="150"></canvas>
+      </div>
+
+      <div id="color-preview-container">
+        <div id="color-preview"></div>
+        <span id="color-code" class="text-sm font-mono">#000000</span>
+      </div>
+    </div>
+
+    <!-- Drawing Canvas -->
+    <div class="flex-1">
+      <canvas id="drawing-canvas" width="600" height="400" class="bg-white"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const drawingCanvas = document.getElementById('drawing-canvas');
+    const drawingCtx = drawingCanvas.getContext('2d');
+    const drawBtn = document.getElementById('draw-btn');
+    const eraseBtn = document.getElementById('erase-btn');
+    const undoBtn = document.getElementById('undo-btn');
+    const redoBtn = document.getElementById('redo-btn');
+    const clearBtn = document.getElementById('clear-btn');
+    const brushSize = document.getElementById('brush-size');
+    const colorPickerCanvas = document.getElementById('color-picker');
+    const brightnessBarCanvas = document.getElementById('brightness-bar');
+    const colorPreview = document.getElementById('color-preview');
+    const colorCode = document.getElementById('color-code');
+
+    const pickerCtx = colorPickerCanvas.getContext('2d');
+    const brightnessCtx = brightnessBarCanvas.getContext('2d');
+
+    let isDrawing = false;
+    let mode = 'draw';
+    let eyedropperActive = false;
+    let history = [];
+    let historyIndex = -1;
+    let selectedHue = 0;
+    let selectedBrightness = 1;
+    let selectedColor = '#000000';
+
+    let lastX, lastY;
+
+    function rgbToHex(r, g, b) {
+      return "#" + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+    }
+
+    function hexToRgb(hex) {
+      if (!/^#[0-9A-Fa-f]{6}$/.test(hex)) return null;
+      const bigint = parseInt(hex.slice(1), 16);
+      return [
+        (bigint >> 16) & 255,
+        (bigint >> 8) & 255,
+        bigint & 255
+      ];
+    }
+
+    function hsbToRgb(h, s, b) {
+      h = h % 360;
+      let c = b * s;
+      let x = c * (1 - Math.abs((h / 60) % 2 - 1));
+      let m = b - c;
+      let [r, g, bl] = [0, 0, 0];
+
+      if (h < 60) [r, g, bl] = [c, x, 0];
+      else if (h < 120) [r, g, bl] = [x, c, 0];
+      else if (h < 180) [r, g, bl] = [0, c, x];
+      else if (h < 240) [r, g, bl] = [0, x, c];
+      else if (h < 300) [r, g, bl] = [x, 0, c];
+      else [r, g, bl] = [c, 0, x];
+
+      return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((bl + m) * 255)];
+    }
+
+    function updateSelectedColor(hue, saturation, brightness) {
+      const [r, g, b] = hsbToRgb(hue, saturation, brightness);
+      selectedColor = rgbToHex(r, g, b);
+      colorPreview.style.backgroundColor = selectedColor;
+      colorCode.textContent = selectedColor;
+      if (mode === 'draw') drawingCtx.strokeStyle = selectedColor;
+    }
+
+    function drawColorPicker() {
+      const width = colorPickerCanvas.width;
+      const height = colorPickerCanvas.height;
+
+      for (let x = 0; x < width; x++) {
+        let hue = (x / width) * 360;
+        for (let y = 0; y < height; y++) {
+          let sat = 1 - (y / height);
+          let [r, g, b] = hsbToRgb(hue, sat, selectedBrightness);
+          pickerCtx.fillStyle = rgbToHex(r, g, b);
+          pickerCtx.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+
+    function drawBrightnessBar() {
+      const width = brightnessBarCanvas.width;
+      const height = brightnessBarCanvas.height;
+
+      for (let y = 0; y < height; y++) {
+        let b = 1 - (y / height);
+        const [r, g, bVal] = hsbToRgb(selectedHue, 1, b);
+        brightnessCtx.fillStyle = rgbToHex(r, g, bVal);
+        brightnessCtx.fillRect(0, y, width, 1);
+      }
+    }
+
+    colorPickerCanvas.addEventListener('click', e => {
+      const rect = colorPickerCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      selectedHue = (x / colorPickerCanvas.width) * 360;
+      const sat = 1 - (y / colorPickerCanvas.height);
+      updateSelectedColor(selectedHue, sat, selectedBrightness);
+    });
+
+    brightnessBarCanvas.addEventListener('click', e => {
+      const rect = brightnessBarCanvas.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      selectedBrightness = 1 - (y / brightnessBarCanvas.height);
+      drawColorPicker();
+      updateSelectedColor(selectedHue, 1, selectedBrightness);
+    });
+
+    drawingCanvas.addEventListener('click', e => {
+      if (!eyedropperActive) return;
+      const rect = drawingCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const pixel = drawingCtx.getImageData(x, y, 1, 1).data;
+      const hex = rgbToHex(pixel[0], pixel[1], pixel[2]);
+      selectedColor = hex;
+      drawingCtx.strokeStyle = selectedColor;
+      colorPreview.style.backgroundColor = selectedColor;
+      colorCode.textContent = selectedColor;
+      eyedropperActive = false;
+    });
+
+    drawingCtx.lineCap = 'round';
+    drawingCtx.lineWidth = brushSize.value;
+    drawingCtx.strokeStyle = selectedColor;
+
+    function saveState() {
+      history = history.slice(0, historyIndex + 1);
+      const state = drawingCtx.getImageData(0, 0, drawingCanvas.width, drawingCanvas.height);
+      history.push(state);
+      historyIndex++;
+      if (history.length > 100) {
+        history.shift();
+        historyIndex--;
+      }
+    }
+
+    function undo() {
+      if (historyIndex <= 0) return;
+      historyIndex--;
+      drawingCtx.putImageData(history[historyIndex], 0, 0);
+    }
+
+    function redo() {
+      if (historyIndex < history.length - 1) {
+        historyIndex++;
+        drawingCtx.putImageData(history[historyIndex], 0, 0);
+      }
+    }
+
+    brushSize.addEventListener('input', () => {
+      drawingCtx.lineWidth = brushSize.value;
+    });
+
+    drawBtn.addEventListener('click', () => {
+      mode = 'draw';
+      drawingCtx.strokeStyle = selectedColor;
+    });
+
+    eraseBtn.addEventListener('click', () => {
+      mode = 'erase';
+      drawingCtx.strokeStyle = '#ffffff';
+    });
+
+    undoBtn.addEventListener('click', undo);
+    redoBtn.addEventListener('click', redo);
+
+    clearBtn.addEventListener('click', () => {
+      drawingCtx.clearRect(0, 0, drawingCanvas.width, drawingCanvas.height);
+      saveState();
+    });
+
+    function startDrawing(e) {
+      isDrawing = true;
+      const rect = drawingCanvas.getBoundingClientRect();
+      lastX = (e.clientX || e.touches[0].clientX) - rect.left;
+      lastY = (e.clientY || e.touches[0].clientY) - rect.top;
+    }
+
+    function draw(e) {
+      if (!isDrawing) return;
+      e.preventDefault();
+      const rect = drawingCanvas.getBoundingClientRect();
+      const x = (e.clientX || e.touches[0].clientX) - rect.left;
+      const y = (e.clientY || e.touches[0].clientY) - rect.top;
+
+      drawingCtx.beginPath();
+      drawingCtx.moveTo(lastX, lastY);
+      drawingCtx.lineTo(x, y);
+      drawingCtx.stroke();
+      lastX = x;
+      lastY = y;
+    }
+
+    function stopDrawing() {
+      if (isDrawing) saveState();
+      isDrawing = false;
+    }
+
+    drawingCanvas.addEventListener('mousedown', startDrawing);
+    drawingCanvas.addEventListener('mousemove', draw);
+    drawingCanvas.addEventListener('mouseup', stopDrawing);
+    drawingCanvas.addEventListener('mouseout', stopDrawing);
+    drawingCanvas.addEventListener('touchstart', startDrawing);
+    drawingCanvas.addEventListener('touchmove', draw);
+    drawingCanvas.addEventListener('touchend', stopDrawing);
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'b') {
+        mode = 'draw';
+        drawingCtx.strokeStyle = selectedColor;
+      } else if (e.key === 'e') {
+        mode = 'erase';
+        drawingCtx.strokeStyle = '#ffffff';
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        undo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+        redo();
+      } else if (e.key === 'r') {
+        eyedropperActive = true;
+      }
+    });
+
+    document.addEventListener('wheel', e => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        let currentSize = parseInt(brushSize.value);
+        if (e.deltaY > 0) {
+          currentSize = Math.min(currentSize + 1, 50);
+        } else {
+          currentSize = Math.max(currentSize - 1, 1);
+        }
+        brushSize.value = currentSize;
+        drawingCtx.lineWidth = currentSize;
+      }
+    }, { passive: false });
+
+    colorCode.addEventListener('click', () => {
+      const userInput = prompt("Enter a hex color code:", selectedColor);
+      const rgb = hexToRgb(userInput);
+      if (rgb) {
+        selectedColor = userInput;
+        drawingCtx.strokeStyle = selectedColor;
+        colorPreview.style.backgroundColor = selectedColor;
+        colorCode.textContent = selectedColor;
+      } else {
+        alert("Invalid hex code. Please enter a valid 6-digit hex color code like #ff33aa");
+      }
+    });
+
+    // Initial render
+    saveState();
+    drawColorPicker();
+    drawBrightnessBar();
+    updateSelectedColor(0, 1, 1);
+  </script>
+</body>
+</html>
